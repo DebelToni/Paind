@@ -14,7 +14,6 @@ final class DrawingView: NSView {
     private enum Mode {
         case normal
         case brush
-        case textInsert
         case textEditing(Int)
     }
     private enum DragOp { case none, marquee, moveSelection, resize(Corner) }
@@ -94,9 +93,23 @@ final class DrawingView: NSView {
         return max(CGFloat(9), pen * 2 + 7)
     }
 
+    private struct HistoryState {
+        var frames: [Frame]
+        var index: Int
+        var canvasOffset: CGPoint
+        var canvasScale: CGFloat
+    }
+    private var undoStack: [HistoryState] = []
+    private var redoStack: [HistoryState] = []
+    private let maxHistoryDepth = 200
+    private var hasCapturedUndoForCurrentDrag = false
+    private var hasCapturedUndoForCurrentEraser = false
+    private var didCaptureTextEditSnapshot = false
+
     // MARK: – Mouse ---------------------------------------------------------
     override func mouseDown(with e: NSEvent) {
         guard e.type == .leftMouseDown else { return }
+        hasCapturedUndoForCurrentDrag = false
         let viewPoint = convert(e.locationInWindow, from: nil)
 
         if case .textEditing = mode, let editor = textEditor, !editor.frame.contains(viewPoint) {
@@ -108,9 +121,6 @@ final class DrawingView: NSView {
         switch mode {
         case .brush:
             beginStroke(atCanvas: p, colour: currentColour)
-
-        case .textInsert:
-            insertTextBox(atCanvas: p)
 
         case .normal:
             if let corner = hitTestHandle(p) {
@@ -195,9 +205,6 @@ final class DrawingView: NSView {
         case .brush:
             appendPointCanvas(p)
 
-        case .textInsert:
-            break
-
         case .normal:
             switch dragOp {
             case .marquee:
@@ -210,12 +217,16 @@ final class DrawingView: NSView {
                 let dx = p.x - dragStartCanvasPt.x
                 let dy = p.y - dragStartCanvasPt.y
                 let step = CGPoint(x: dx - lastDelta.x, y: dy - lastDelta.y)
+                if (abs(step.x) > 0.0001 || abs(step.y) > 0.0001) {
+                    captureUndoForCurrentDragIfNeeded()
+                }
                 translateSelected(by: step)
                 lastDelta = CGPoint(x: dx, y: dy)
                 needsDisplay = true
 
             case .resize(let corner):
                 guard resizeStartRect.width != 0, resizeStartRect.height != 0 else { return }
+                captureUndoForCurrentDragIfNeeded()
                 var newRect = resizeStartRect
                 // drag the appropriate corner to current point `p`
                 switch corner {
@@ -315,13 +326,15 @@ final class DrawingView: NSView {
                 originalLineWidths.removeAll()
                 originalImageRects.removeAll()
                 originalTextRects.removeAll()
+                commitCurrentFrame()
                 needsDisplay = true
             case .none:
                 break
             }
             dragOp = .none
+            hasCapturedUndoForCurrentDrag = false
 
-        case .textInsert, .textEditing:
+        case .textEditing:
             break
         }
     }
@@ -348,10 +361,14 @@ final class DrawingView: NSView {
 
     // Right-click → object eraser (strokes by proximity, else images under pointer)
     override func rightMouseDown(with e: NSEvent) {
+        hasCapturedUndoForCurrentEraser = false
         deleteObject(atCanvas: toCanvas(e.locationInWindow))
     }
     override func rightMouseDragged(with e: NSEvent) {
         deleteObject(atCanvas: toCanvas(e.locationInWindow))
+    }
+    override func rightMouseUp(with e: NSEvent) {
+        hasCapturedUndoForCurrentEraser = false
     }
 
     // MARK: – Scroll to zoom (and pinch)
@@ -393,6 +410,21 @@ final class DrawingView: NSView {
             return
         }
 
+        if let chars = e.charactersIgnoringModifiers?.lowercased() {
+            if e.modifierFlags.contains(.command), chars == "z" {
+                if e.modifierFlags.contains(.shift) {
+                    redoAction()
+                } else {
+                    undoAction()
+                }
+                return
+            }
+            if e.modifierFlags.contains(.control), chars == "r" {
+                redoAction()
+                return
+            }
+        }
+
         // First handle non-character keys
         switch e.keyCode {
         case 53: // Esc → NORMAL mode
@@ -427,6 +459,9 @@ final class DrawingView: NSView {
         switch ch {
         case "i":
             prepareForTextInsertion()
+            return
+        case "u":
+            undoAction()
             return
 
         // Brush colors → set color, switch to INSERT, and (if LMB held) start drawing now
@@ -493,6 +528,8 @@ final class DrawingView: NSView {
     }
 
     private func insertPasted(image: NSImage) {
+        endTextEditingIfNeeded()
+        pushUndoSnapshot()
         // Paste centered at mouse if inside view; else center of view
         let viewPt: NSPoint = {
             if let w = window {
@@ -516,6 +553,7 @@ final class DrawingView: NSView {
         selectedTextIndices.removeAll()
         selectionRect = unionOfSelected()
         mode = .normal
+        commitCurrentFrame()
         needsDisplay = true
     }
 
@@ -523,12 +561,112 @@ final class DrawingView: NSView {
     private func prepareForTextInsertion() {
         endTextEditingIfNeeded()
         clearSelection()
-        mode = .textInsert
+        let insertionPoint = currentCanvasInsertionPoint()
+        insertTextBox(atCanvas: insertionPoint)
+    }
+
+    // MARK: – Undo / Redo ----------------------------------------------------
+
+    private func pushUndoSnapshot() {
+        commitCurrentFrame()
+        let state = makeHistoryState()
+        undoStack.append(state)
+        if undoStack.count > maxHistoryDepth {
+            undoStack.removeFirst()
+        }
+        redoStack.removeAll()
+    }
+
+    private func makeHistoryState() -> HistoryState {
+        HistoryState(frames: deepCopyFrames(frames),
+                     index: index,
+                     canvasOffset: canvasOffset,
+                     canvasScale: canvasScale)
+    }
+
+    private func deepCopyFrames(_ frames: [Frame]) -> [Frame] {
+        frames.map { frame in
+            let strokeCopies = frame.strokes.map { stroke -> Stroke in
+                let pathCopy = stroke.path.copy() as! NSBezierPath
+                return Stroke(path: pathCopy, colour: stroke.colour)
+            }
+            return Frame(strokes: strokeCopies,
+                         images: frame.images,
+                         texts: frame.texts)
+        }
+    }
+
+    private func restoreHistoryState(_ state: HistoryState) {
+        frames = deepCopyFrames(state.frames)
+        if frames.isEmpty {
+            frames = [Frame()]
+        }
+        index = min(state.index, frames.count - 1)
+        strokes = frames[index].strokes
+        images = frames[index].images
+        textBoxes = frames[index].texts
+        canvasOffset = state.canvasOffset
+        canvasScale = state.canvasScale
+        clearSelection()
+        currentPath = nil
+        mode = .normal
+        dragOp = .none
+        hasCapturedUndoForCurrentDrag = false
+        hasCapturedUndoForCurrentEraser = false
+        didCaptureTextEditSnapshot = false
         needsDisplay = true
+        syncTextEditorFrame()
+        window?.makeFirstResponder(self)
+    }
+
+    private func undoAction() {
+        commitCurrentFrame()
+        guard let state = undoStack.popLast() else {
+            NSSound.beep()
+            return
+        }
+        let currentState = makeHistoryState()
+        redoStack.append(currentState)
+        if case .textEditing = mode {
+            finishEditingText(commit: false)
+        }
+        restoreHistoryState(state)
+    }
+
+    private func redoAction() {
+        commitCurrentFrame()
+        guard let state = redoStack.popLast() else {
+            NSSound.beep()
+            return
+        }
+        let currentState = makeHistoryState()
+        undoStack.append(currentState)
+        if undoStack.count > maxHistoryDepth {
+            undoStack.removeFirst()
+        }
+        if case .textEditing = mode {
+            finishEditingText(commit: false)
+        }
+        restoreHistoryState(state)
+    }
+
+    private func captureUndoForCurrentDragIfNeeded() {
+        if !hasCapturedUndoForCurrentDrag {
+            pushUndoSnapshot()
+            hasCapturedUndoForCurrentDrag = true
+        }
+    }
+
+    private func captureUndoForEraserIfNeeded() {
+        if !hasCapturedUndoForCurrentEraser {
+            pushUndoSnapshot()
+            hasCapturedUndoForCurrentEraser = true
+        }
     }
 
     private func insertTextBox(atCanvas point: CGPoint) {
         endTextEditingIfNeeded()
+        pushUndoSnapshot()
         let origin = CGPoint(x: point.x - defaultTextBoxSize.width / 2,
                              y: point.y - defaultTextBoxSize.height / 2)
         let box = TextBox(text: "",
@@ -539,6 +677,7 @@ final class DrawingView: NSView {
         textBoxes.append(box)
         let idx = textBoxes.count - 1
         selectTextBox(idx)
+        commitCurrentFrame()
         startEditingText(at: idx, selectAll: true)
     }
 
@@ -557,6 +696,7 @@ final class DrawingView: NSView {
     private func startEditingText(at index: Int, selectAll: Bool = false) {
         guard textBoxes.indices.contains(index) else { return }
         finishEditingText(commit: true)
+        didCaptureTextEditSnapshot = false
 
         let box = textBoxes[index]
         let editorFrame = viewRect(fromCanvas: box.frame)
@@ -602,6 +742,7 @@ final class DrawingView: NSView {
 
     private func finishEditingText(commit: Bool) {
         guard let editor = textEditor, let idx = textEditorIndex else {
+            didCaptureTextEditSnapshot = false
             textEditor = nil
             textEditorIndex = nil
             mode = .normal
@@ -615,8 +756,10 @@ final class DrawingView: NSView {
             frame.size.width = max(frame.size.width, metrics.width)
             frame.size.height = max(frame.size.height, metrics.height)
             textBoxes[idx].frame = frame
+            commitCurrentFrame()
         }
 
+        didCaptureTextEditSnapshot = false
         editor.removeFromSuperview()
         textEditor = nil
         textEditorIndex = nil
@@ -650,16 +793,24 @@ final class DrawingView: NSView {
     private func applyPenSizeToSelectedText() -> Bool {
         guard !selectedTextIndices.isEmpty else { return false }
         let newSize = desiredTextFontSize(forPen: penSize)
+        var changed = false
         for idx in selectedTextIndices where textBoxes.indices.contains(idx) {
+            if abs(textBoxes[idx].fontSize - newSize) < 0.001 { continue }
+            if !changed {
+                pushUndoSnapshot()
+                changed = true
+            }
             textBoxes[idx].fontSize = newSize
             let metrics = intrinsicTextSize(for: textBoxes[idx])
             textBoxes[idx].frame.size.width = max(textBoxes[idx].frame.size.width, metrics.width)
             textBoxes[idx].frame.size.height = max(textBoxes[idx].frame.size.height, metrics.height)
         }
+        guard changed else { return false }
         if let current = textEditorIndex, selectedTextIndices.contains(current) {
             syncTextEditorFrame()
         }
         selectionRect = unionOfSelected()
+        commitCurrentFrame()
         needsDisplay = true
         return true
     }
@@ -667,13 +818,21 @@ final class DrawingView: NSView {
     @discardableResult
     private func applyColourToSelectedText(_ colour: NSColor) -> Bool {
         guard !selectedTextIndices.isEmpty else { return false }
+        var changed = false
         for idx in selectedTextIndices where textBoxes.indices.contains(idx) {
+            if textBoxes[idx].colour == colour { continue }
+            if !changed {
+                pushUndoSnapshot()
+                changed = true
+            }
             textBoxes[idx].colour = colour
         }
+        guard changed else { return false }
         if let current = textEditorIndex, selectedTextIndices.contains(current) {
             textEditor?.textColor = colour
             textEditor?.insertionPointColor = colour
         }
+        commitCurrentFrame()
         needsDisplay = true
         return true
     }
@@ -802,6 +961,7 @@ final class DrawingView: NSView {
     }
     private func addBlankFrameAfterCurrent() {
         commitCurrentFrame()
+        pushUndoSnapshot()
         frames.insert(Frame(), at: index + 1)
         index += 1
         strokes = []
@@ -813,6 +973,7 @@ final class DrawingView: NSView {
 
     // MARK: – Stroke helpers ------------------------------------------------
     private func beginStroke(atCanvas p: NSPoint, colour: NSColor) {
+        pushUndoSnapshot()
         let path = NSBezierPath()
         path.lineWidth = penSize
         path.lineCapStyle = .round
@@ -828,32 +989,35 @@ final class DrawingView: NSView {
     }
 
     private func deleteObject(atCanvas p: NSPoint) {
-        var removedSomething = false
-
-        // First try strokes by proximity
-        let before = strokes.count
-        strokes.removeAll { $0.path.hitsStroke(p, tolerance: 2) }
-        if strokes.count != before { removedSomething = true }
-
-        // If nothing removed, try topmost image under point
-        if !removedSomething {
-            if let idx = images.indices.reversed().first(where: { images[$0].frame.contains(p) }) {
-                images.remove(at: idx)
-                removedSomething = true
+        let strokeHits = strokes.enumerated().filter { $0.element.path.hitsStroke(p, tolerance: 2) }.map(\.offset)
+        if !strokeHits.isEmpty {
+            captureUndoForEraserIfNeeded()
+            for idx in strokeHits.sorted(by: >) {
+                strokes.remove(at: idx)
             }
-        }
-        if !removedSomething {
-            if let idx = textBoxes.indices.reversed().first(where: { textBoxes[$0].frame.contains(p) }) {
-                if case .textEditing(let editingIdx) = mode, editingIdx == idx {
-                    finishEditingText(commit: false)
-                }
-                textBoxes.remove(at: idx)
-                removedSomething = true
-            }
-        }
-
-        if removedSomething {
             compactSelectionAfterDeletion()
+            commitCurrentFrame()
+            needsDisplay = true
+            return
+        }
+
+        if let idx = images.indices.reversed().first(where: { images[$0].frame.contains(p) }) {
+            captureUndoForEraserIfNeeded()
+            images.remove(at: idx)
+            compactSelectionAfterDeletion()
+            commitCurrentFrame()
+            needsDisplay = true
+            return
+        }
+
+        if let idx = textBoxes.indices.reversed().first(where: { textBoxes[$0].frame.contains(p) }) {
+            captureUndoForEraserIfNeeded()
+            if case .textEditing(let editingIdx) = mode, editingIdx == idx {
+                finishEditingText(commit: false)
+            }
+            textBoxes.remove(at: idx)
+            compactSelectionAfterDeletion()
+            commitCurrentFrame()
             needsDisplay = true
         }
     }
@@ -866,6 +1030,23 @@ final class DrawingView: NSView {
         // canvas C = (V - offset)/scale
         return NSPoint(x: (v.x - canvasOffset.x) / canvasScale,
                        y: (v.y - canvasOffset.y) / canvasScale)
+    }
+
+    private func canvasPoint(fromView viewPt: CGPoint) -> CGPoint {
+        CGPoint(x: (viewPt.x - canvasOffset.x) / canvasScale,
+                y: (viewPt.y - canvasOffset.y) / canvasScale)
+    }
+
+    private func currentCanvasInsertionPoint() -> CGPoint {
+        if let window = window {
+            let winPt = window.mouseLocationOutsideOfEventStream
+            let viewPt = convert(winPt, from: nil)
+            if bounds.contains(viewPt) {
+                return canvasPoint(fromView: viewPt)
+            }
+        }
+        let centerView = CGPoint(x: bounds.midX, y: bounds.midY)
+        return canvasPoint(fromView: centerView)
     }
 
     // MARK: – Selection utilities
@@ -1003,12 +1184,17 @@ extension DrawingView: NSTextViewDelegate {
         guard let idx = textEditorIndex,
               textBoxes.indices.contains(idx),
               let editor = textEditor else { return }
+        if !didCaptureTextEditSnapshot {
+            pushUndoSnapshot()
+            didCaptureTextEditSnapshot = true
+        }
         textBoxes[idx].text = editor.string
         let metrics = intrinsicTextSize(for: textBoxes[idx])
         var frame = textBoxes[idx].frame
         frame.size.width = max(frame.size.width, metrics.width)
         frame.size.height = max(frame.size.height, metrics.height)
         textBoxes[idx].frame = frame
+        commitCurrentFrame()
         syncTextEditorFrame()
         selectionRect = unionOfSelected()
         needsDisplay = true
