@@ -76,21 +76,21 @@ final class DrawingView: NSView {
     private let defaultTextBoxSize = CGSize(width: 240, height: 120)
     private let defaultFontName = NSFont.systemFont(ofSize: 12).fontName
     private let textFontSizeMap: [CGFloat: CGFloat] = [
-        CGFloat(1): CGFloat(9),
-        CGFloat(3): CGFloat(12),
-        CGFloat(5): CGFloat(15),
-        CGFloat(7): CGFloat(18),
-        CGFloat(9): CGFloat(21),
-        CGFloat(12): CGFloat(26),
-        CGFloat(15): CGFloat(32),
-        CGFloat(19): CGFloat(38),
-        CGFloat(24): CGFloat(46)
+        CGFloat(1): CGFloat(12),
+        CGFloat(3): CGFloat(18),
+        CGFloat(5): CGFloat(21),
+        CGFloat(7): CGFloat(26),
+        CGFloat(9): CGFloat(32),
+        CGFloat(12): CGFloat(38),
+        CGFloat(15): CGFloat(46),
+        CGFloat(19): CGFloat(55),
+        CGFloat(24): CGFloat(64)
     ]
     private func desiredTextFontSize(forPen pen: CGFloat) -> CGFloat {
         if let mapped = textFontSizeMap[pen] {
             return mapped
         }
-        return max(CGFloat(9), pen * 2 + 7)
+        return max(CGFloat(9), pen * 3 + 9)
     }
 
     private struct HistoryState {
