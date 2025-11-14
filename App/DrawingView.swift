@@ -107,6 +107,7 @@ final class DrawingView: NSView {
     private var hasCapturedUndoForCurrentDrag = false
     private var hasCapturedUndoForCurrentEraser = false
     private var didCaptureTextEditSnapshot = false
+    private var currentDocumentURL: URL?
 
     // MARK: – Mouse ---------------------------------------------------------
     override func mouseDown(with e: NSEvent) {
@@ -429,6 +430,15 @@ final class DrawingView: NSView {
         syncTextEditorFrame()
     }
 
+    private func performSave(to url: URL) {
+        do {
+            try writeDocument(to: url)
+            currentDocumentURL = url
+        } catch {
+            presentErrorAlert(message: "Failed to save document.", info: error.localizedDescription)
+        }
+    }
+
     // MARK: – Keyboard ------------------------------------------------------
     override func keyDown(with e: NSEvent) {
         // Handle ⌘V (paste)
@@ -452,6 +462,11 @@ final class DrawingView: NSView {
             }
             if e.modifierFlags.contains(.command), chars == "y" {
                 redoAction()
+                return
+            }
+            if chars == "s",
+               (e.modifierFlags.contains(.command) || e.modifierFlags.contains(.control)) {
+                quickSave()
                 return
             }
         }
@@ -633,36 +648,10 @@ final class DrawingView: NSView {
             }
             return
         }
-
-        endTextEditingIfNeeded()
-        let panel = NSSavePanel()
-        if #available(macOS 12.0, *) {
-            if let type = UTType(filenameExtension: "paind", conformingTo: .data) {
-                panel.allowedContentTypes = [type]
-            } else {
-                panel.allowedContentTypes = [.data]
-            }
+        if currentDocumentURL != nil {
+            quickSave()
         } else {
-            panel.allowedFileTypes = ["paind"]
-        }
-        panel.nameFieldStringValue = "Untitled.paind"
-        panel.canCreateDirectories = true
-        panel.allowsOtherFileTypes = true
-
-        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            do {
-                try self?.writeDocument(to: url)
-            } catch {
-                self?.presentErrorAlert(message: "Failed to save document.", info: error.localizedDescription)
-            }
-        }
-
-        if let hostWindow = window {
-            panel.beginSheetModal(for: hostWindow, completionHandler: completion)
-        } else {
-            let response = panel.runModal()
-            completion(response)
+            saveDocumentPromptingIfNeeded()
         }
     }
 
@@ -693,6 +682,7 @@ final class DrawingView: NSView {
             guard response == .OK, let url = panel.url else { return }
             do {
                 try self?.readDocument(from: url)
+                self?.currentDocumentURL = url
             } catch {
                 self?.presentErrorAlert(message: "Failed to open document.", info: error.localizedDescription)
             }
@@ -703,6 +693,44 @@ final class DrawingView: NSView {
         } else {
             let response = panel.runModal()
             completion(response)
+        }
+    }
+
+    private func saveDocumentPromptingIfNeeded() {
+        endTextEditingIfNeeded()
+        let panel = NSSavePanel()
+        if #available(macOS 12.0, *) {
+            if let type = UTType(filenameExtension: "paind", conformingTo: .data) {
+                panel.allowedContentTypes = [type]
+            } else {
+                panel.allowedContentTypes = [.data]
+            }
+        } else {
+            panel.allowedFileTypes = ["paind"]
+        }
+        panel.nameFieldStringValue = currentDocumentURL?.lastPathComponent ?? "Untitled.paind"
+        panel.canCreateDirectories = true
+        panel.allowsOtherFileTypes = true
+
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.performSave(to: url)
+        }
+
+        if let hostWindow = window {
+            panel.beginSheetModal(for: hostWindow, completionHandler: completion)
+        } else {
+            let response = panel.runModal()
+            completion(response)
+        }
+    }
+
+    private func quickSave() {
+        endTextEditingIfNeeded()
+        if let existingURL = currentDocumentURL {
+            performSave(to: existingURL)
+        } else {
+            saveDocumentPromptingIfNeeded()
         }
     }
 

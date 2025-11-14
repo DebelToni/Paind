@@ -20,6 +20,7 @@
 | Press `Enter` | Toggles onion-skinning of the previous frame |
 | Press `0` | Resets canvas zoom/pan to the default view |
 | Press `d` | Enters eraser mode so the left button deletes like the right-click eraser |
+| Press `ctrl-s` or `⌘S` | Saves the document (reusing the existing location if already saved) |
 | Press `⌘V` | Pastes an image from the clipboard at the cursor |
 | Middle-click drag | Pans the canvas |
 | Scroll wheel or trackpad pinch | Zooms the canvas around the pointer |
