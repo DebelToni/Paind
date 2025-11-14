@@ -15,6 +15,7 @@ final class DrawingView: NSView {
     private enum Mode {
         case normal
         case brush
+        case eraser
         case textEditing(Int)
     }
     private enum DragOp { case none, marquee, moveSelection, resize(Corner) }
@@ -123,6 +124,9 @@ final class DrawingView: NSView {
         case .brush:
             beginStroke(atCanvas: p, colour: currentColour)
 
+        case .eraser:
+            deleteObject(atCanvas: p)
+
         case .normal:
             if let corner = hitTestHandle(p) {
                 // Begin resizing
@@ -205,6 +209,9 @@ final class DrawingView: NSView {
         switch mode {
         case .brush:
             appendPointCanvas(p)
+
+        case .eraser:
+            deleteObject(atCanvas: p)
 
         case .normal:
             switch dragOp {
@@ -301,6 +308,10 @@ final class DrawingView: NSView {
         case .brush:
             appendPointCanvas(p)
             currentPath = nil
+
+        case .eraser:
+            hasCapturedUndoForCurrentEraser = false
+            break
 
         case .normal:
             switch dragOp {
@@ -411,6 +422,13 @@ final class DrawingView: NSView {
         syncTextEditorFrame()
     }
 
+    private func resetZoom() {
+        canvasScale = 1.0
+        canvasOffset = .zero
+        needsDisplay = true
+        syncTextEditorFrame()
+    }
+
     // MARK: – Keyboard ------------------------------------------------------
     override func keyDown(with e: NSEvent) {
         // Handle ⌘V (paste)
@@ -463,6 +481,11 @@ final class DrawingView: NSView {
 
         guard let ch = e.characters?.first else { return }
 
+        if ch == "0" {
+            resetZoom()
+            return
+        }
+
         if let s = penSizes[ch] {
             penSize = s
             if applyPenSizeToSelectedText() { return }
@@ -477,17 +500,25 @@ final class DrawingView: NSView {
             undoAction()
             return
 
-        case "h" where mode == .normal:
-            panViewByKeyboard(dx: bounds.width * 0.1, dy: 0)
+        case "d":
+            endTextEditingIfNeeded()
+            mode = .eraser
+            currentPath = nil
+            hasCapturedUndoForCurrentEraser = false
+            needsDisplay = true
             return
-        case "l" where mode == .normal:
+
+        case "h":
             panViewByKeyboard(dx: -bounds.width * 0.1, dy: 0)
             return
-        case "j" where mode == .normal:
-            panViewByKeyboard(dx: 0, dy: bounds.height * 0.1)
+        case "l":
+            panViewByKeyboard(dx: bounds.width * 0.1, dy: 0)
             return
-        case "k" where mode == .normal:
+        case "j":
             panViewByKeyboard(dx: 0, dy: -bounds.height * 0.1)
+            return
+        case "k":
+            panViewByKeyboard(dx: 0, dy: bounds.height * 0.1)
             return
 
         // Brush colors → set color, switch to INSERT, and (if LMB held) start drawing now
@@ -1004,18 +1035,18 @@ final class DrawingView: NSView {
         cg.translateBy(x: canvasOffset.x, y: canvasOffset.y)
         cg.scaleBy(x: canvasScale, y: canvasScale)
 
-        // Onion skin (previous frame at 25 % opacity)
+        // Onion skin (previous frame at 50 % opacity)
         if onionSkin, index > 0 {
             // Images (faint)
             for im in frames[index - 1].images {
                 cg.saveGState()
-                cg.setAlpha(0.25)
+                cg.setAlpha(0.5)
                 im.image.draw(in: im.frame)
                 cg.restoreGState()
             }
             // Strokes (faint)
             for s in frames[index - 1].strokes {
-                s.colour.withAlphaComponent(0.25).setStroke()
+                s.colour.withAlphaComponent(0.5).setStroke()
                 s.path.stroke()
             }
         }
@@ -1572,7 +1603,7 @@ private extension DrawingView {
                 segments.append(PaindPathSegment(kind: .moveTo, points: [points[0]]))
             case .lineTo:
                 segments.append(PaindPathSegment(kind: .lineTo, points: [points[0]]))
-            case .curveTo:
+            case .curveTo, .cubicCurveTo:
                 segments.append(PaindPathSegment(kind: .curveTo, points: [points[0], points[1], points[2]]))
             case .closePath:
                 segments.append(PaindPathSegment(kind: .close, points: []))

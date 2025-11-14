@@ -16,8 +16,10 @@
 | Press `←` / `→` | Moves to the previous or next animation frame |
 | Press `Space` | Inserts a blank frame after the current one |
 | Press `⇧Space` | Duplicates the current frame (strokes/images/text) into a new frame to the right |
-| Press `h j k l` (normal mode) | Pans the view left/down/up/right by 10% of the visible window |
+| Press `h j k l` | Nudges the entire canvas left/down/up/right (10% of the current view) |
 | Press `Enter` | Toggles onion-skinning of the previous frame |
+| Press `0` | Resets canvas zoom/pan to the default view |
+| Press `d` | Enters eraser mode so the left button deletes like the right-click eraser |
 | Press `⌘V` | Pastes an image from the clipboard at the cursor |
 | Middle-click drag | Pans the canvas |
 | Scroll wheel or trackpad pinch | Zooms the canvas around the pointer |
