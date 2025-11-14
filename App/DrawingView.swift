@@ -7,6 +7,7 @@
 import Cocoa
 import CoreGraphics
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class DrawingView: NSView {
 
@@ -423,6 +424,10 @@ final class DrawingView: NSView {
                 redoAction()
                 return
             }
+            if e.modifierFlags.contains(.command), chars == "y" {
+                redoAction()
+                return
+            }
         }
 
         // First handle non-character keys
@@ -478,7 +483,11 @@ final class DrawingView: NSView {
 
         case " ":
             endTextEditingIfNeeded()
-            addBlankFrameAfterCurrent()
+            if e.modifierFlags.contains(.shift) {
+                duplicateFrameAfterCurrent()
+            } else {
+                addBlankFrameAfterCurrent()
+            }
             return
         default:
             break
@@ -563,6 +572,86 @@ final class DrawingView: NSView {
         clearSelection()
         let insertionPoint = currentCanvasInsertionPoint()
         insertTextBox(atCanvas: insertionPoint)
+    }
+
+    @objc func saveDocumentFromMenu() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.saveDocumentFromMenu()
+            }
+            return
+        }
+
+        endTextEditingIfNeeded()
+        let panel = NSSavePanel()
+        if #available(macOS 12.0, *) {
+            if let type = UTType(filenameExtension: "paind", conformingTo: .data) {
+                panel.allowedContentTypes = [type]
+            } else {
+                panel.allowedContentTypes = [.data]
+            }
+        } else {
+            panel.allowedFileTypes = ["paind"]
+        }
+        panel.nameFieldStringValue = "Untitled.paind"
+        panel.canCreateDirectories = true
+        panel.allowsOtherFileTypes = true
+
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try self?.writeDocument(to: url)
+            } catch {
+                self?.presentErrorAlert(message: "Failed to save document.", info: error.localizedDescription)
+            }
+        }
+
+        if let hostWindow = window {
+            panel.beginSheetModal(for: hostWindow, completionHandler: completion)
+        } else {
+            let response = panel.runModal()
+            completion(response)
+        }
+    }
+
+    @objc func openDocumentFromMenu() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.openDocumentFromMenu()
+            }
+            return
+        }
+
+        endTextEditingIfNeeded()
+        let panel = NSOpenPanel()
+        if #available(macOS 12.0, *) {
+            if let type = UTType(filenameExtension: "paind", conformingTo: .data) {
+                panel.allowedContentTypes = [type]
+            } else {
+                panel.allowedContentTypes = [.data]
+            }
+        } else {
+            panel.allowedFileTypes = ["paind"]
+        }
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try self?.readDocument(from: url)
+            } catch {
+                self?.presentErrorAlert(message: "Failed to open document.", info: error.localizedDescription)
+            }
+        }
+
+        if let hostWindow = window {
+            panel.beginSheetModal(for: hostWindow, completionHandler: completion)
+        } else {
+            let response = panel.runModal()
+            completion(response)
+        }
     }
 
     // MARK: – Undo / Redo ----------------------------------------------------
@@ -971,6 +1060,19 @@ final class DrawingView: NSView {
         needsDisplay = true
     }
 
+    private func duplicateFrameAfterCurrent() {
+        commitCurrentFrame()
+        pushUndoSnapshot()
+        let copied = deepCopyFrames([frames[index]]).first ?? Frame()
+        frames.insert(copied, at: index + 1)
+        index += 1
+        strokes = frames[index].strokes
+        images = frames[index].images
+        textBoxes = frames[index].texts
+        clearSelection()
+        needsDisplay = true
+    }
+
     // MARK: – Stroke helpers ------------------------------------------------
     private func beginStroke(atCanvas p: NSPoint, colour: NSColor) {
         pushUndoSnapshot()
@@ -1198,5 +1300,286 @@ extension DrawingView: NSTextViewDelegate {
         syncTextEditorFrame()
         selectionRect = unionOfSelected()
         needsDisplay = true
+    }
+}
+
+// MARK: – Persistence ------------------------------------------------------
+private extension DrawingView {
+    struct PaindDocument: Codable {
+        var version: Int
+        var canvasScale: CGFloat
+        var canvasOffset: CGPoint
+        var currentFrameIndex: Int
+        var penSize: CGFloat
+        var currentColour: PaindColour
+        var frames: [PaindFrame]
+    }
+
+    struct PaindFrame: Codable {
+        var strokes: [PaindStroke]
+        var images: [PaindImage]
+        var texts: [PaindTextBox]
+    }
+
+    struct PaindStroke: Codable {
+        var colour: PaindColour
+        var lineWidth: CGFloat
+        var lineCap: Int
+        var lineJoin: Int
+        var miterLimit: CGFloat
+        var segments: [PaindPathSegment]
+    }
+
+    struct PaindPathSegment: Codable {
+        enum Kind: String, Codable {
+            case moveTo, lineTo, curveTo, close
+        }
+        var kind: Kind
+        var points: [CGPoint]
+    }
+
+    struct PaindImage: Codable {
+        var frame: CGRect
+        var base64PNG: String
+    }
+
+    struct PaindTextBox: Codable {
+        var text: String
+        var frame: CGRect
+        var fontSize: CGFloat
+        var colour: PaindColour
+        var fontName: String
+    }
+
+    struct PaindColour: Codable {
+        var r: CGFloat
+        var g: CGFloat
+        var b: CGFloat
+        var a: CGFloat
+
+        init(color: NSColor) {
+            if let converted = color.usingColorSpace(.deviceRGB) ?? color.usingColorSpace(.sRGB) {
+                r = converted.redComponent
+                g = converted.greenComponent
+                b = converted.blueComponent
+                a = converted.alphaComponent
+            } else {
+                r = color.redComponent
+                g = color.greenComponent
+                b = color.blueComponent
+                a = color.alphaComponent
+            }
+        }
+
+        func makeColor() -> NSColor {
+            NSColor(deviceRed: r, green: g, blue: b, alpha: a)
+        }
+    }
+
+    enum PaindPersistenceError: LocalizedError {
+        case imageEncodingFailed
+        case imageDecodingFailed
+
+        var errorDescription: String? {
+            switch self {
+            case .imageEncodingFailed:
+                return "Unable to encode image data."
+            case .imageDecodingFailed:
+                return "Unable to decode image data."
+            }
+        }
+    }
+
+    func writeDocument(to url: URL) throws {
+        commitCurrentFrame()
+        let document = PaindDocument(
+            version: 1,
+            canvasScale: canvasScale,
+            canvasOffset: canvasOffset,
+            currentFrameIndex: index,
+            penSize: penSize,
+            currentColour: PaindColour(color: currentColour),
+            frames: try frames.map { frame in
+                PaindFrame(
+                    strokes: frame.strokes.map { persistedStroke(from: $0) },
+                    images: try frame.images.map { try persistedImage(from: $0) },
+                    texts: frame.texts.map { persistedText(from: $0) }
+                )
+            }
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(document)
+        try data.write(to: url, options: .atomic)
+    }
+
+    func readDocument(from url: URL) throws {
+        endTextEditingIfNeeded()
+        let data = try Data(contentsOf: url)
+        let decoder = JSONDecoder()
+        let document = try decoder.decode(PaindDocument.self, from: data)
+        try apply(document: document)
+    }
+
+    func presentErrorAlert(message: String, info: String?) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = message
+        if let info = info, !info.isEmpty {
+            alert.informativeText = info
+        }
+        if let hostWindow = window {
+            alert.beginSheetModal(for: hostWindow, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    func apply(document: PaindDocument) throws {
+        let convertedFrames: [Frame] = try document.frames.map { persistedFrame in
+            let strokes = try persistedFrame.strokes.map { try stroke(from: $0) }
+            let images = try persistedFrame.images.map { try image(from: $0) }
+            let texts = persistedFrame.texts.map { textBox(from: $0) }
+            return Frame(strokes: strokes, images: images, texts: texts)
+        }
+
+        frames = convertedFrames.isEmpty ? [Frame()] : convertedFrames
+        index = max(0, min(document.currentFrameIndex, frames.count - 1))
+        strokes = frames[index].strokes
+        images = frames[index].images
+        textBoxes = frames[index].texts
+
+        canvasScale = document.canvasScale
+        canvasOffset = document.canvasOffset
+        penSize = document.penSize
+        currentColour = document.currentColour.makeColor()
+
+        undoStack.removeAll()
+        redoStack.removeAll()
+        currentPath = nil
+        mode = .brush
+        dragOp = .none
+        clearSelection()
+        needsDisplay = true
+        syncTextEditorFrame()
+        window?.makeFirstResponder(self)
+    }
+
+    func persistedStroke(from stroke: Stroke) -> PaindStroke {
+        PaindStroke(
+            colour: PaindColour(color: stroke.colour),
+            lineWidth: stroke.path.lineWidth,
+            lineCap: Int(stroke.path.lineCapStyle.rawValue),
+            lineJoin: Int(stroke.path.lineJoinStyle.rawValue),
+            miterLimit: stroke.path.miterLimit,
+            segments: segments(from: stroke.path)
+        )
+    }
+
+    func persistedImage(from image: ImageObject) throws -> PaindImage {
+        guard let data = pngData(for: image.image) else {
+            throw PaindPersistenceError.imageEncodingFailed
+        }
+        return PaindImage(frame: image.frame, base64PNG: data.base64EncodedString())
+    }
+
+    func persistedText(from text: TextBox) -> PaindTextBox {
+        PaindTextBox(
+            text: text.text,
+            frame: text.frame,
+            fontSize: text.fontSize,
+            colour: PaindColour(color: text.colour),
+            fontName: text.fontName
+        )
+    }
+
+    func stroke(from persisted: PaindStroke) throws -> Stroke {
+        let path = NSBezierPath()
+        path.lineWidth = persisted.lineWidth
+        if let cap = NSBezierPath.LineCapStyle(rawValue: UInt(persisted.lineCap)) {
+            path.lineCapStyle = cap
+        }
+        if let join = NSBezierPath.LineJoinStyle(rawValue: UInt(persisted.lineJoin)) {
+            path.lineJoinStyle = join
+        }
+        path.miterLimit = persisted.miterLimit
+        for segment in persisted.segments {
+            switch segment.kind {
+            case .moveTo:
+                if let point = segment.points.first {
+                    path.move(to: point)
+                }
+            case .lineTo:
+                if let point = segment.points.first {
+                    path.line(to: point)
+                }
+            case .curveTo:
+                guard segment.points.count == 3 else { continue }
+                path.curve(to: segment.points[2], controlPoint1: segment.points[0], controlPoint2: segment.points[1])
+            case .close:
+                path.close()
+            }
+        }
+        return Stroke(path: path, colour: persisted.colour.makeColor())
+    }
+
+    func image(from persisted: PaindImage) throws -> ImageObject {
+        guard let data = Data(base64Encoded: persisted.base64PNG),
+              let image = NSImage(data: data) else {
+            throw PaindPersistenceError.imageDecodingFailed
+        }
+        return ImageObject(image: image, frame: persisted.frame)
+    }
+
+    func textBox(from persisted: PaindTextBox) -> TextBox {
+        TextBox(
+            text: persisted.text,
+            frame: persisted.frame,
+            fontSize: persisted.fontSize,
+            colour: persisted.colour.makeColor(),
+            fontName: persisted.fontName
+        )
+    }
+
+    func segments(from path: NSBezierPath) -> [PaindPathSegment] {
+        var segments: [PaindPathSegment] = []
+        for index in 0..<path.elementCount {
+            var points = [NSPoint](repeating: .zero, count: 3)
+            switch path.element(at: index, associatedPoints: &points) {
+            case .moveTo:
+                segments.append(PaindPathSegment(kind: .moveTo, points: [points[0]]))
+            case .lineTo:
+                segments.append(PaindPathSegment(kind: .lineTo, points: [points[0]]))
+            case .curveTo:
+                segments.append(PaindPathSegment(kind: .curveTo, points: [points[0], points[1], points[2]]))
+            case .closePath:
+                segments.append(PaindPathSegment(kind: .close, points: []))
+            case .quadraticCurveTo:
+                let start = path.currentPoint
+                let control = points[0]
+                let end = points[1]
+                let c1 = CGPoint(x: start.x + 2.0 / 3.0 * (control.x - start.x),
+                                 y: start.y + 2.0 / 3.0 * (control.y - start.y))
+                let c2 = CGPoint(x: end.x + 2.0 / 3.0 * (control.x - end.x),
+                                 y: end.y + 2.0 / 3.0 * (control.y - end.y))
+                segments.append(PaindPathSegment(kind: .curveTo, points: [c1, c2, end]))
+            @unknown default:
+                continue
+            }
+        }
+        return segments
+    }
+
+    func pngData(for image: NSImage) -> Data? {
+        if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            let bitmap = NSBitmapImageRep(cgImage: cgImage)
+            return bitmap.representation(using: .png, properties: [:])
+        }
+        if let tiff = image.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiff) {
+            return bitmap.representation(using: .png, properties: [:])
+        }
+        return nil
     }
 }
