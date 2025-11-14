@@ -16,6 +16,7 @@
 | Press `←` / `→` | Moves to the previous or next animation frame |
 | Press `Space` | Inserts a blank frame after the current one |
 | Press `⇧Space` | Duplicates the current frame (strokes/images/text) into a new frame to the right |
+| Press `h j k l` (normal mode) | Pans the view left/down/up/right by 10% of the visible window |
 | Press `Enter` | Toggles onion-skinning of the previous frame |
 | Press `⌘V` | Pastes an image from the clipboard at the cursor |
 | Middle-click drag | Pans the canvas |

@@ -403,6 +403,14 @@ final class DrawingView: NSView {
         syncTextEditorFrame()
     }
 
+    private func panViewByKeyboard(dx: CGFloat, dy: CGFloat) {
+        guard dx != 0 || dy != 0 else { return }
+        canvasOffset.x += dx
+        canvasOffset.y += dy
+        needsDisplay = true
+        syncTextEditorFrame()
+    }
+
     // MARK: – Keyboard ------------------------------------------------------
     override func keyDown(with e: NSEvent) {
         // Handle ⌘V (paste)
@@ -467,6 +475,19 @@ final class DrawingView: NSView {
             return
         case "u":
             undoAction()
+            return
+
+        case "h" where mode == .normal:
+            panViewByKeyboard(dx: bounds.width * 0.1, dy: 0)
+            return
+        case "l" where mode == .normal:
+            panViewByKeyboard(dx: -bounds.width * 0.1, dy: 0)
+            return
+        case "j" where mode == .normal:
+            panViewByKeyboard(dx: 0, dy: bounds.height * 0.1)
+            return
+        case "k" where mode == .normal:
+            panViewByKeyboard(dx: 0, dy: -bounds.height * 0.1)
             return
 
         // Brush colors → set color, switch to INSERT, and (if LMB held) start drawing now
