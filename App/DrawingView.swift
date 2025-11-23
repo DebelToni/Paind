@@ -78,21 +78,21 @@ final class DrawingView: NSView {
     private let defaultTextBoxSize = CGSize(width: 240, height: 120)
     private let defaultFontName = NSFont.systemFont(ofSize: 12).fontName
     private let textFontSizeMap: [CGFloat: CGFloat] = [
-        CGFloat(1): CGFloat(12),
-        CGFloat(3): CGFloat(18),
-        CGFloat(5): CGFloat(21),
-        CGFloat(7): CGFloat(26),
-        CGFloat(9): CGFloat(32),
-        CGFloat(12): CGFloat(38),
-        CGFloat(15): CGFloat(46),
-        CGFloat(19): CGFloat(55),
-        CGFloat(24): CGFloat(64)
+        CGFloat(1): CGFloat(16),
+        CGFloat(3): CGFloat(22),
+        CGFloat(5): CGFloat(28),
+        CGFloat(7): CGFloat(36),  // press “4” yields a larger jump (was ~21)
+        CGFloat(9): CGFloat(46),
+        CGFloat(12): CGFloat(60),
+        CGFloat(15): CGFloat(78), // still ~3× old “9”
+        CGFloat(19): CGFloat(98),
+        CGFloat(24): CGFloat(120)
     ]
     private func desiredTextFontSize(forPen pen: CGFloat) -> CGFloat {
         if let mapped = textFontSizeMap[pen] {
             return mapped
         }
-        return max(CGFloat(9), pen * 3 + 9)
+        return max(CGFloat(21), pen * 3 + 12)
     }
 
     private struct HistoryState {
@@ -587,6 +587,12 @@ final class DrawingView: NSView {
     func paste(_ sender: Any?) {
         let pb = NSPasteboard.general
 
+        // If a text editor is active, let it handle paste
+        if case .textEditing = mode, let editor = textEditor {
+            editor.paste(sender)
+            return
+        }
+
         // Try direct NSImage first
         if let imgs = pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage],
            let img = imgs.first {
@@ -883,6 +889,8 @@ final class DrawingView: NSView {
         editor.isHorizontallyResizable = false
         editor.isVerticallyResizable = false
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        editor.baseWritingDirection = .natural
+        editor.acceptsGlyphInfo = true
         if let container = editor.textContainer {
             container.widthTracksTextView = false
             container.heightTracksTextView = false
